@@ -3,10 +3,11 @@ const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 1. Point this directly to your raw GitHub repository M3U file link
-const M3U_PLAYLIST_URL = "https://raw.githubusercontent.com/Armond452Alt/Fixed-M3U/main/CN/AS.m3u";
+// Central file configuration path settings
+const GITHUB_USER = "Armond452Alt";
+const GITHUB_REPO = "Fixed-M3U";
+const M3U_PATH = "CN/AS.m3u";
 
-// Global database caches
 let channelCache = [];
 let userInfo = {
   username: "tvpass",
@@ -17,7 +18,6 @@ let userInfo = {
   max_connections: "50"
 };
 
-// 2. Automated IPTV-Org Logo Matcher Engine
 function getLogoUrl(name) {
   const lower = name.toLowerCase();
   const base = "https://iptv-org.github.io/logos/languages/mul/";
@@ -28,55 +28,80 @@ function getLogoUrl(name) {
   return "https://iptv-org.github.io/logos/categories/classic.png";
 }
 
-// 3. Central M3U Transmission Stream Parser
-function updatePlaylistCache() {
-  https.get(M3U_PLAYLIST_URL, (res) => {
-    let data = '';
-    res.on('data', (chunk) => { data += chunk; });
-    res.on('end', () => {
-      const lines = data.split('\n');
-      let currentName = '';
-      let tempCache = [];
-      let streamIdCounter = 100;
-
-      lines.forEach(line => {
-        line = line.trim();
-        if (line.startsWith('#EXTINF:')) {
-          const commaIndex = line.lastIndexOf(',');
-          if (commaIndex !== -1) {
-            currentName = line.substring(commaIndex + 1).trim();
-          }
-        } else if (line.startsWith('http') && currentName) {
-          streamIdCounter++;
-          tempCache.push({
-            num: tempCache.length + 1,
-            name: currentName,
-            stream_id: streamIdCounter,
-            stream_icon: getLogoUrl(currentName),
-            epg_channel_id: currentName.toLowerCase().includes('cartoon') ? "CartoonNetwork.la@mx" : "AdultSwim.us",
-            category_id: "1",
-            direct_url: line // Kept internally for backend video delivery redirects
-          });
-          currentName = '';
-        }
-      });
-
-      if (tempCache.length > 0) {
-        channelCache = tempCache;
-        console.log(`Successfully mapped ${channelCache.length} dynamic pipeline channels from M3U.`);
+// Helper function to handle streaming text downloads from GitHub
+function fetchM3U(branch) {
+  return new Promise((resolve, reject) => {
+    const url = `https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${branch}/${M3U_PATH}`;
+    console.log(`Attempting pipeline extraction from branch route: [${branch}]`);
+    
+    https.get(url, (res) => {
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP Route Status Error: ${res.statusCode}`));
       }
-    });
-  }).on('error', (err) => {
-    console.error("Error updating stream sync profiles: ", err.message);
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => resolve(data));
+    }).on('error', (err) => reject(err));
   });
 }
 
-// Initial pull on initialization boot
+// Master parsing function that attempts to read main first, then falls back to master
+async function updatePlaylistCache() {
+  let playlistData = null;
+
+  try {
+    // Try primary default branch route
+    playlistData = await fetchM3U('main');
+  } catch (error) {
+    console.log("Primary 'main' line offline. Dropping down to 'master' fallback transmission line...");
+    try {
+      // Try secondary fallback branch route
+      playlistData = await fetchM3U('master');
+    } catch (fallbackError) {
+      console.error("CRITICAL: All branch retrieval routes failed. Check file placement inside repository.");
+      return;
+    }
+  }
+
+  if (!playlistData) return;
+
+  const lines = playlistData.split('\n');
+  let currentName = '';
+  let tempCache = [];
+  let streamIdCounter = 100;
+
+  lines.forEach(line => {
+    line = line.trim();
+    if (line.startsWith('#EXTINF:')) {
+      const commaIndex = line.lastIndexOf(',');
+      if (commaIndex !== -1) {
+        currentName = line.substring(commaIndex + 1).trim();
+      }
+    } else if (line.startsWith('http') && currentName) {
+      streamIdCounter++;
+      tempCache.push({
+        num: tempCache.length + 1,
+        name: currentName,
+        stream_id: streamIdCounter,
+        stream_icon: getLogoUrl(currentName),
+        epg_channel_id: currentName.toLowerCase().includes('cartoon') ? "CartoonNetwork.la@mx" : "AdultSwim.us",
+        category_id: "1",
+        direct_url: line
+      });
+      currentName = '';
+    }
+  });
+
+  if (tempCache.length > 0) {
+    channelCache = tempCache;
+    console.log(`SUCCESS: ${channelCache.length} live channels parsed and loaded into Xtream database engine.`);
+  }
+}
+
+// Boot configuration loops
 updatePlaylistCache();
-// Automatically refresh cache matrix every 30 minutes to capture playlist alterations
 setInterval(updatePlaylistCache, 30 * 60 * 1000);
 
-// 4. Panel Login and Live Directory Router Endpoints
 app.get(['/player_api.php', '/get.php'], (req, res) => {
   const { username, password, action } = req.query;
 
@@ -85,7 +110,6 @@ app.get(['/player_api.php', '/get.php'], (req, res) => {
   }
 
   if (action === 'get_live_streams') {
-    // Return all parsed channels out safely to the grid array layout
     return res.json(channelCache.map(({direct_url, ...keep}) => keep));
   }
 
@@ -105,13 +129,11 @@ app.get(['/player_api.php', '/get.php'], (req, res) => {
   });
 });
 
-// 5. Dynamic Video Stream Handoff Controller
 app.get('/live/:username/:password/:streamId.m3u8', (req, res) => {
   const { streamId } = req.params;
   const targetChannel = channelCache.find(c => c.stream_id.toString() === streamId.toString());
 
   if (targetChannel && targetChannel.direct_url) {
-    // Deliver a direct handoff 302 redirect payload straight into the player core engine
     return res.redirect(302, targetChannel.direct_url);
   }
   return res.status(404).send("Transmission signature route offline.");
