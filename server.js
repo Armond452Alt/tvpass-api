@@ -1,9 +1,14 @@
 const express = require('express');
+const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Universal login credentials data bank
-const userInfo = {
+// 1. Point this directly to your raw GitHub repository M3U file link
+const M3U_PLAYLIST_URL = "https://raw.githubusercontent.com/Armond452Alt/Fixed-M3U/main/CN/AS.m3u";
+
+// Global database caches
+let channelCache = [];
+let userInfo = {
   username: "tvpass",
   password: "live",
   auth: 1,
@@ -12,71 +17,106 @@ const userInfo = {
   max_connections: "50"
 };
 
-const serverInfo = {
-  url: "render.com",
-  port: "443",
-  https_port: "443",
-  server_protocol: "https",
-  timezone: "America/New_York"
-};
+// 2. Automated IPTV-Org Logo Matcher Engine
+function getLogoUrl(name) {
+  const lower = name.toLowerCase();
+  const base = "https://iptv-org.github.io/logos/languages/mul/";
+  if (lower.includes('adult swim') || lower.includes('swim')) return `${base}AdultSwim.png`;
+  if (lower.includes('cartoon') || lower.includes('cn')) return `${base}CartoonNetwork.png`;
+  if (lower.includes('nickelodeon')) return `${base}Nickelodeon.png`;
+  if (lower.includes('nicktoons')) return `${base}Nicktoons.png`;
+  return "https://iptv-org.github.io/logos/categories/classic.png";
+}
 
-// Handle player requests seamlessly whether they call player_api.php or get.php
-app.get(['/player_api.php', '/get.php'], (req, requireResponse) => {
+// 3. Central M3U Transmission Stream Parser
+function updatePlaylistCache() {
+  https.get(M3U_PLAYLIST_URL, (res) => {
+    let data = '';
+    res.on('data', (chunk) => { data += chunk; });
+    res.on('end', () => {
+      const lines = data.split('\n');
+      let currentName = '';
+      let tempCache = [];
+      let streamIdCounter = 100;
+
+      lines.forEach(line => {
+        line = line.trim();
+        if (line.startsWith('#EXTINF:')) {
+          const commaIndex = line.lastIndexOf(',');
+          if (commaIndex !== -1) {
+            currentName = line.substring(commaIndex + 1).trim();
+          }
+        } else if (line.startsWith('http') && currentName) {
+          streamIdCounter++;
+          tempCache.push({
+            num: tempCache.length + 1,
+            name: currentName,
+            stream_id: streamIdCounter,
+            stream_icon: getLogoUrl(currentName),
+            epg_channel_id: currentName.toLowerCase().includes('cartoon') ? "CartoonNetwork.la@mx" : "AdultSwim.us",
+            category_id: "1",
+            direct_url: line // Kept internally for backend video delivery redirects
+          });
+          currentName = '';
+        }
+      });
+
+      if (tempCache.length > 0) {
+        channelCache = tempCache;
+        console.log(`Successfully mapped ${channelCache.length} dynamic pipeline channels from M3U.`);
+      }
+    });
+  }).on('error', (err) => {
+    console.error("Error updating stream sync profiles: ", err.message);
+  });
+}
+
+// Initial pull on initialization boot
+updatePlaylistCache();
+// Automatically refresh cache matrix every 30 minutes to capture playlist alterations
+setInterval(updatePlaylistCache, 30 * 60 * 1000);
+
+// 4. Panel Login and Live Directory Router Endpoints
+app.get(['/player_api.php', '/get.php'], (req, res) => {
   const { username, password, action } = req.query;
 
-  // Validate the login credentials
   if (username !== userInfo.username || password !== userInfo.password) {
-    return requireResponse.status(403).json({ error: "Invalid pipeline login authorization data" });
+    return res.status(403).json({ error: "Invalid credentials" });
   }
 
-  // Action route controller: when the player asks for channels
   if (action === 'get_live_streams') {
-    const liveStreams = [
-      {
-        num: 1,
-        name: "Cartoon Network",
-        stream_id: 101,
-        stream_icon: "https://iptv-org.github.io/logos/languages/mul/CartoonNetwork.png",
-        epg_channel_id: "CartoonNetwork.la@mx",
-        category_id: "1"
-      },
-      {
-        num: 2,
-        name: "Adult Swim",
-        stream_id: 102,
-        stream_icon: "https://iptv-org.github.io/logos/languages/mul/AdultSwim.png",
-        epg_channel_id: "AdultSwim.us",
-        category_id: "1"
-      }
-    ];
-    return requireResponse.json(liveStreams);
+    // Return all parsed channels out safely to the grid array layout
+    return res.json(channelCache.map(({direct_url, ...keep}) => keep));
   }
 
-  // Action route controller: when the player asks for categories
   if (action === 'get_live_categories') {
-    return requireResponse.json([{ category_id: "1", category_name: "TVPass Animation Network" }]);
+    return res.json([{ category_id: "1", category_name: "TVPass Network Pipeline" }]);
   }
 
-  // Default fallback: return general account panel login details
-  return requireResponse.json({ user_info: userInfo, server_info: serverInfo });
+  return res.json({
+    user_info: userInfo,
+    server_info: {
+      url: "render.com",
+      port: "443",
+      https_port: "443",
+      server_protocol: "https",
+      timezone: "America/New_York"
+    }
+  });
 });
 
-// Video stream request target endpoint
-app.get('/live/:username/:password/:streamId.m3u8', (req, requireResponse) => {
+// 5. Dynamic Video Stream Handoff Controller
+app.get('/live/:username/:password/:streamId.m3u8', (req, res) => {
   const { streamId } = req.params;
-  
-  // Point the streaming target IDs directly to your active feeds
-  let directStreamUrl = "";
-  if (streamId === "101") directStreamUrl = "https://your-stream-provider.com/live/cartoon_network.m3u8";
-  if (streamId === "102") directStreamUrl = "https://your-stream-provider.com/live/adult_swim.m3u8";
+  const targetChannel = channelCache.find(c => c.stream_id.toString() === streamId.toString());
 
-  if (directStreamUrl) {
-    // Issue a clean 302 stream pointer redirect directly to the player video processor
-    return requireResponse.redirect(302, directStreamUrl);
+  if (targetChannel && targetChannel.direct_url) {
+    // Deliver a direct handoff 302 redirect payload straight into the player core engine
+    return res.redirect(302, targetChannel.direct_url);
   }
-  return requireResponse.status(404).send("Stream channel signature offline.");
+  return res.status(404).send("Transmission signature route offline.");
 });
 
 app.listen(PORT, () => {
-  console.log(`TVPass pipeline online on interface target port ${PORT}`);
+  console.log(`Live Xtream network syncing active on target interface port ${PORT}`);
 });
