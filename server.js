@@ -3,20 +3,13 @@ const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Central file configuration path settings
 const GITHUB_USER = "Armond452Alt";
 const GITHUB_REPO = "Fixed-M3U";
 const M3U_PATH = "CN/AS.m3u";
 
 let channelCache = [];
-let userInfo = {
-  username: "tvpass",
-  password: "live",
-  auth: 1,
-  status: "Active",
-  exp_date: "1798761600",
-  max_connections: "50000"
-};
+let lastStatusReport = "Server started. Initializing network check...";
+let userInfo = { username: "tvpass", password: "live", auth: 1, status: "Active", exp_date: "1798761600", max_connections: "50" };
 
 function getLogoUrl(name) {
   const lower = name.toLowerCase();
@@ -28,16 +21,11 @@ function getLogoUrl(name) {
   return "https://iptv-org.github.io/logos/categories/classic.png";
 }
 
-// Helper function to handle streaming text downloads from GitHub
 function fetchM3U(branch) {
   return new Promise((resolve, reject) => {
     const url = `https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${branch}/${M3U_PATH}`;
-    console.log(`Attempting pipeline extraction from branch route: [${branch}]`);
-    
     https.get(url, (res) => {
-      if (res.statusCode !== 200) {
-        return reject(new Error(`HTTP Route Status Error: ${res.statusCode}`));
-      }
+      if (res.statusCode !== 200) return reject(new Error(`GitHub returned HTTP Code ${res.statusCode}`));
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => resolve(data));
@@ -45,26 +33,22 @@ function fetchM3U(branch) {
   });
 }
 
-// Master parsing function that attempts to read main first, then falls back to master
 async function updatePlaylistCache() {
-  let playlistData = null;
-
   try {
-    // Try primary default branch route
-    playlistData = await fetchM3U('main');
+    const playlistData = await fetchM3U('main');
+    parsePlaylist(playlistData, 'main');
   } catch (error) {
-    console.log("Primary 'main' line offline. Dropping down to 'master' fallback transmission line...");
     try {
-      // Try secondary fallback branch route
-      playlistData = await fetchM3U('master');
+      const playlistData = await fetchM3U('master');
+      parsePlaylist(playlistData, 'master');
     } catch (fallbackError) {
-      console.error("CRITICAL: All branch retrieval routes failed. Check file placement inside repository.");
-      return;
+      lastStatusReport = `CRITICAL ERROR: Failed to fetch your M3U file from GitHub from both 'main' and 'master' branches. Double-check that your file is named exactly '${M3U_PATH}' inside your '${GITHUB_REPO}' repository. Error: ${fallbackError.message}`;
+      console.error(lastStatusReport);
     }
   }
+}
 
-  if (!playlistData) return;
-
+function parsePlaylist(playlistData, branch) {
   const lines = playlistData.split('\n');
   let currentName = '';
   let tempCache = [];
@@ -94,51 +78,42 @@ async function updatePlaylistCache() {
 
   if (tempCache.length > 0) {
     channelCache = tempCache;
-    console.log(`SUCCESS: ${channelCache.length} live channels parsed and loaded into Xtream database engine.`);
+    lastStatusReport = `SUCCESS: Loaded ${channelCache.length} channels perfectly from the [${branch}] branch line.`;
+    console.log(lastStatusReport);
+  } else {
+    lastStatusReport = `WARNING: Connected to GitHub [${branch}] successfully, but could not parse any channels out of the file text. Check your M3U syntax formatting.`;
   }
 }
 
-// Boot configuration loops
+// Automatic Sync Routines
 updatePlaylistCache();
-setInterval(updatePlaylistCache, 30 * 60 * 1000);
+setInterval(updatePlaylistCache, 15 * 60 * 1000);
 
+// --- DIAGNOSTIC HOME DASHBOARD ---
+app.get('/', (req, res) => {
+  res.send(`
+    <style>body{background:#111;color:#fff;font-family:sans-serif;padding:40px;} .box{background:#222;padding:20px;border-radius:8px;border:1px solid #333;margin-top:20px;}</style>
+    <h2>TVPass Xtream API Diagnostic Link</h2>
+    <div class="box"><strong>System Status:</strong> ${lastStatusReport}</div>
+    <div class="box"><strong>Active Channels in Database:</strong> ${channelCache.length}</div>
+    <div class="box"><strong>Detected Channel Inventory:</strong><br><pre>${JSON.stringify(channelCache.map(c => c.name), null, 2)}</pre></div>
+  `);
+});
+
+// Xtream App API endpoints
 app.get(['/player_api.php', '/get.php'], (req, res) => {
   const { username, password, action } = req.query;
-
-  if (username !== userInfo.username || password !== userInfo.password) {
-    return res.status(403).json({ error: "Invalid credentials" });
-  }
-
-  if (action === 'get_live_streams') {
-    return res.json(channelCache.map(({direct_url, ...keep}) => keep));
-  }
-
-  if (action === 'get_live_categories') {
-    return res.json([{ category_id: "1", category_name: "TVPass Network Pipeline" }]);
-  }
-
-  return res.json({
-    user_info: userInfo,
-    server_info: {
-      url: "render.com",
-      port: "443",
-      https_port: "443",
-      server_protocol: "https",
-      timezone: "America/New_York"
-    }
-  });
+  if (username !== userInfo.username || password !== userInfo.password) return res.status(403).json({ error: "Invalid credentials" });
+  if (action === 'get_live_streams') return res.json(channelCache.map(({direct_url, ...keep}) => keep));
+  if (action === 'get_live_categories') return res.json([{ category_id: "1", category_name: "TVPass Network Pipeline" }]);
+  return res.json({ user_info: userInfo, server_info: { url: "render.com", port: "443", https_port: "443", server_protocol: "https", timezone: "America/New_York" } });
 });
 
 app.get('/live/:username/:password/:streamId.m3u8', (req, res) => {
   const { streamId } = req.params;
   const targetChannel = channelCache.find(c => c.stream_id.toString() === streamId.toString());
-
-  if (targetChannel && targetChannel.direct_url) {
-    return res.redirect(302, targetChannel.direct_url);
-  }
-  return res.status(404).send("Transmission signature route offline.");
+  if (targetChannel && targetChannel.direct_url) return res.redirect(302, targetChannel.direct_url);
+  return res.status(404).send("Off-line");
 });
 
-app.listen(PORT, () => {
-  console.log(`Live Xtream network syncing active on target interface port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Online on port ${PORT}`));
