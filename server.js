@@ -15,7 +15,7 @@ let userInfo = {
   auth: 1,
   status: "Active",
   exp_date: "1798761600",
-  max_connections: "50"
+  max_connections: "50000"
 };
 
 function getLogoUrl(name) {
